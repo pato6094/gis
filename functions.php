@@ -116,6 +116,19 @@ function extractAmazonAsin(string $url): ?string {
     return null;
 }
 
+function normalizeMarketplace(?string $value): string {
+    if (!$value) {
+        return 'amazon.it';
+    }
+
+    $cleaned = trim($value);
+    $cleaned = preg_replace('~^https?://~i', '', $cleaned);
+    $cleaned = preg_replace('~^www\.~i', '', $cleaned);
+    $cleaned = preg_replace('~/.*$~', '', $cleaned);
+
+    return str_starts_with($cleaned, 'amazon.') ? $cleaned : 'amazon.it';
+}
+
 function getAffiliateTag(): string {
     return trim((string) getSetting('affiliate_tag', DEFAULT_AFFILIATE_TAG));
 }
