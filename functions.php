@@ -103,7 +103,7 @@ function resolveShortAmazonUrl(string $url): string {
 
 function extractAmazonAsin(string $url): ?string {
     $patterns = [
-        '~/(?:dp|gp/product|gp/aw/d|gp/offer-listing|offer-listing)/([A-Z0-9]{10})(?:[/?]|$)~i',
+        '~/(?:dp|gp/product|d|product|gp/aw/d|gp/offer-listing|offer-listing)/([A-Z0-9]{10})(?:[/?]|$)~i',
         '~[?&]asin=([A-Z0-9]{10})(?:[&]|$)~i',
     ];
 
@@ -136,14 +136,16 @@ function fetch_remote_html(string $url, bool $followLocation = true): ?string {
         CURLOPT_MAXREDIRS => 10,
         CURLOPT_TIMEOUT => 25,
         CURLOPT_CONNECTTIMEOUT => 15,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36',
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => false,
         CURLOPT_ENCODING => '',
         CURLOPT_HTTPHEADER => [
+            'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language: it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
             'Cache-Control: no-cache',
             'Pragma: no-cache',
+            'Upgrade-Insecure-Requests: 1',
         ],
     ]);
 
@@ -192,33 +194,31 @@ function extract_amazon_price_from_html(string $html): ?float {
 
     $xpath = new DOMXPath($dom);
 
-    $primaryXPath = '/html/body/div[1]/div[2]/div[2]/div[5]/div[4]/div[17]/div/div/div[6]/div[1]/span[2]/span[2]';
-    $nodes = $xpath->query($primaryXPath);
-    if ($nodes instanceof DOMNodeList && $nodes->length > 0) {
-        $price = normalize_price_string(trim($nodes->item(0)->textContent));
-        if ($price !== null) {
-            return $price;
-        }
-    }
-
-    $fallbackXPaths = [
+    $priceSelectors = [
+        '//*[contains(@class,"a-price")]//span[contains(@class,"a-offscreen")]',
+        '//*[contains(@class,"priceToPay")]//span[contains(@class,"a-offscreen")]',
+        '//*[contains(@class,"apexPriceToPay")]//span[contains(@class,"a-offscreen")]',
         '//*[@id="priceblock_ourprice"]',
         '//*[@id="priceblock_dealprice"]',
+        '//*[@id="price_inside_buybox"]',
         '//*[@id="priceblock_saleprice"]',
         '//*[@id="corePrice_feature_div"]//span[contains(@class,"a-offscreen")]',
         '//*[@id="corePriceDisplay_desktop_feature_div"]//span[contains(@class,"a-offscreen")]',
-        '//*[contains(@class,"a-price")]//span[contains(@class,"a-offscreen")]',
     ];
 
-    foreach ($fallbackXPaths as $expr) {
+    foreach ($priceSelectors as $expr) {
         $nodes = $xpath->query($expr);
         if (!($nodes instanceof DOMNodeList) || $nodes->length === 0) {
             continue;
         }
 
         foreach ($nodes as $node) {
-            $price = normalize_price_string(trim($node->textContent));
-            if ($price !== null) {
+            $rawText = trim($node->textContent);
+            if ($rawText === '') {
+                continue;
+            }
+            $price = normalize_price_string($rawText);
+            if ($price !== null && $price > 0) {
                 return $price;
             }
         }
@@ -226,7 +226,7 @@ function extract_amazon_price_from_html(string $html): ?float {
 
     if (preg_match('/"priceAmount"\s*:\s*"?(\d+[\.,]\d{2})"?/i', $html, $matches)) {
         $price = normalize_price_string($matches[1]);
-        if ($price !== null) {
+        if ($price !== null && $price > 0) {
             return $price;
         }
     }
@@ -235,15 +235,47 @@ function extract_amazon_price_from_html(string $html): ?float {
 }
 
 function extractAmazonTitleFromHtml(string $html): string {
-    $title = 'Prodotto Amazon';
+    libxml_use_internal_errors(true);
+
+    $dom = new DOMDocument();
+    if ($dom->loadHTML($html)) {
+        $xpath = new DOMXPath($dom);
+
+        $titleSelectors = [
+            '//*[@id="productTitle"]',
+            '//*[@id="title"]',
+        ];
+
+        foreach ($titleSelectors as $selector) {
+            $nodes = $xpath->query($selector);
+            if ($nodes instanceof DOMNodeList && $nodes->length > 0) {
+                $title = trim($nodes->item(0)->textContent);
+                $title = preg_replace('/\s+/', ' ', $title);
+                $title = html_entity_decode($title, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                if ($title !== '') {
+                    return $title;
+                }
+            }
+        }
+    }
 
     if (preg_match('~<span[^>]*id="productTitle"[^>]*>(.*?)</span>~is', $html, $m)) {
         $title = trim(html_entity_decode(strip_tags($m[1]), ENT_QUOTES | ENT_HTML5, 'UTF-8'));
-    } elseif (preg_match('~<meta[^>]*property="og:title"[^>]*content="([^"]+)"~i', $html, $m)) {
-        $title = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        $title = preg_replace('/\s+/', ' ', $title);
+        if ($title !== '') {
+            return $title;
+        }
     }
 
-    return $title !== '' ? $title : 'Prodotto Amazon';
+    if (preg_match('~<meta[^>]*property="og:title"[^>]*content="([^"]+)"~i', $html, $m)) {
+        $title = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        $title = preg_replace('/\s+/', ' ', $title);
+        if ($title !== '') {
+            return $title;
+        }
+    }
+
+    return 'Prodotto Amazon';
 }
 
 function get_amazon_product_price(string $url): ?float {
